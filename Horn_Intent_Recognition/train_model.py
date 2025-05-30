@@ -11,7 +11,7 @@ import joblib
 AUDIO_DIR = 'audio'
 EXCEL_PATH = 'horn_intents.xlsx'
 
-# Load Excel sheet
+# Loading Excel sheet
 df = pd.read_excel(EXCEL_PATH)
 
 # Feature Extraction Function (MFCC + Spectral Features)
@@ -19,7 +19,7 @@ def extract_features(file_path):
     try:
         y, sr = librosa.load(file_path, sr=None)
 
-        # Extract MFCCs
+        # Extracting MFCCs
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
         mfcc_mean = np.mean(mfcc.T, axis=0)
 
@@ -39,7 +39,7 @@ def extract_features(file_path):
         rms = librosa.feature.rms(y=y)
         rms_mean = np.mean(rms)
 
-        # Combine all features
+        # Combining all features
         features = np.hstack([
             mfcc_mean,
             spec_centroid_mean,
@@ -53,7 +53,7 @@ def extract_features(file_path):
         print(f"Error processing {file_path}: {e}")
         return None
 
-# Extract features and labels
+# Extracting features and labels
 features = []
 labels = []
 
@@ -71,7 +71,7 @@ print(f"✅ Extracted {len(features)} samples.")
 # Train-test split
 X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
 
-# Train model
+# Training model
 print("🧠 Training model with Random Forest...")
 clf = RandomForestClassifier(n_estimators=100, random_state=42)
 clf.fit(X_train, y_train)
@@ -85,6 +85,6 @@ print(classification_report(y_test, y_pred))
 accuracy = accuracy_score(y_test, y_pred)
 print(f"✅ Overall Model Accuracy: {accuracy * 100:.2f}%")
 
-# Save model
+# Saving the model
 joblib.dump(clf, 'horn_intent_model.pkl')
 print("💾 Model saved to horn_intent_model.pkl")

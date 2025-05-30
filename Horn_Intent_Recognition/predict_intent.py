@@ -5,14 +5,14 @@ import numpy as np
 
 # ---------------- CONFIG ----------------
 MODEL_PATH = 'horn_intent_model.pkl'
-AUDIO_FILE = 'Horn3.wav'   # <- Replace with your test file name
+AUDIO_FILE = 'Horn3.wav'   # <- Test file name
 # ----------------------------------------
 
-# Load model
+# Loading the model
 print("🔍 Loading trained model...")
 model = joblib.load(MODEL_PATH)
 
-# Extract features from the new file
+# Extracting features from the new file
 def extract_features(file_path):
     try:
         y, sr = librosa.load(file_path, sr=None)
@@ -46,7 +46,7 @@ def extract_features(file_path):
         return None
 
 
-# Check if file exists
+# Checking if file exists
 if not os.path.exists(AUDIO_FILE):
     print(f"❌ File '{AUDIO_FILE}' not found.")
 else:
@@ -56,6 +56,6 @@ else:
     if feat is not None:
         feat = feat.reshape(1, -1)  # reshape for prediction
         prediction = model.predict(feat)[0]
-        print(f"\nPredicted Intent: **{prediction}**")
+        print(f"\nPredicted Intent: {prediction}")
     else:
         print("⚠️ Could not extract features.")
