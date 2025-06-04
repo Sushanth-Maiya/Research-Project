@@ -1,76 +1,110 @@
-import os
-import pandas as pd
-import librosa
-import numpy as np
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import classification_report, accuracy_score
-import joblib
+# Import required libraries
+import os  # To work with file paths and directories
+import pandas as pd  # To read and work with Excel files
+import librosa  # Audio analysis and feature extraction
+import numpy as np  # Numerical computing (arrays, math functions)
+from sklearn.model_selection import train_test_split  # To split dataset into training and test sets
+from sklearn.ensemble import RandomForestClassifier  # Our ML model
+from sklearn.metrics import classification_report, accuracy_score  # For evaluating the model
+import joblib  # For saving and loading trained models
 
-# Config
-AUDIO_DIR = 'audio'
-EXCEL_PATH = 'horn_intents.xlsx'
+# === Step 1: Set paths to data ===
+AUDIO_DIR = 'audio'  # Folder where audio files are stored
+EXCEL_PATH = 'horn_intents.xlsx'  # Excel file mapping audio filenames to horn intents
 
-# Estimate direction angle
-def estimate_direction(left, right, sr, mic_distance=0.2):
-    corr = np.correlate(left, right, 'full')
-    delay = np.argmax(corr) - (len(right) - 1)
-    time_diff = delay / sr
-    try:
-        angle_rad = np.arcsin(np.clip(time_diff * 343 / mic_distance, -1, 1))
-        return np.degrees(angle_rad)
-    except:
-        return 0.0
+# === Step 2: Load labels from Excel file ===
+# The Excel file must have at least two columns: 'filename' and 'intent'
+df = pd.read_excel(EXCEL_PATH)
 
-# Feature extraction
+# === Step 3: Function to extract audio and localization features ===
 def extract_features(file_path):
     try:
+        # Load stereo audio. mono=False keeps left and right channels separate
         y, sr = librosa.load(file_path, sr=None, mono=False)
-        if y.ndim < 2:
-            print(f"❗ File not stereo: {file_path}")
-            return None
+        left = y[0]  # Left channel audio data
+        right = y[1]  # Right channel audio data
 
-        left, right = y[0], y[1]
+        # ========== Audio Features (from LEFT channel only) ==========
 
+        # 1. MFCCs (Mel-Frequency Cepstral Coefficients): represent timbre
         mfcc = librosa.feature.mfcc(y=left, sr=sr, n_mfcc=13)
-        mfcc_mean = np.mean(mfcc.T, axis=0)
-        centroid = np.mean(librosa.feature.spectral_centroid(y=left, sr=sr))
-        rolloff = np.mean(librosa.feature.spectral_rolloff(y=left, sr=sr))
-        zcr = np.mean(librosa.feature.zero_crossing_rate(left))
-        rms = np.mean(librosa.feature.rms(y=left))
-        angle = estimate_direction(left, right, sr)
+        mfcc_mean = np.mean(mfcc.T, axis=0)  # Take mean across time
 
-        return np.hstack([mfcc_mean, centroid, rolloff, zcr, rms, angle])
+        # 2. Spectral Centroid: where the "center of mass" of sound is
+        centroid = librosa.feature.spectral_centroid(y=left, sr=sr)
+        centroid_mean = np.mean(centroid)
+
+        # 3. Spectral Rolloff: frequency below which most energy is concentrated
+        rolloff = librosa.feature.spectral_rolloff(y=left, sr=sr)
+        rolloff_mean = np.mean(rolloff)
+
+        # 4. Zero Crossing Rate: number of times waveform crosses zero
+        zcr = librosa.feature.zero_crossing_rate(y=left)
+        zcr_mean = np.mean(zcr)
+
+        # 5. RMS Energy: average energy (loudness)
+        rms = librosa.feature.rms(y=left)
+        rms_mean = np.mean(rms)
+
+        # ========== Sound Localization Feature ==========
+
+        # Estimate Time Delay between left and right signals using cross-correlation
+        corr = np.correlate(left, right, mode='full')  # Cross-correlation
+        lag = np.argmax(corr) - len(right) + 1  # Time lag in samples
+        time_diff = lag / sr  # Convert lag to time (seconds)
+
+        # Use time difference to estimate direction (left: -1, right: +1)
+        direction = np.clip(time_diff * 343.0, -1.0, 1.0)  # 343 m/s = speed of sound
+
+        # Combine all features into one array
+        features = np.hstack([
+            mfcc_mean,         # 13 MFCCs
+            centroid_mean,     # 1 value
+            rolloff_mean,      # 1 value
+            zcr_mean,          # 1 value
+            rms_mean,          # 1 value
+            direction          # 1 value from localization
+        ])
+        return features
+
     except Exception as e:
-        print(f"Error: {file_path} -> {e}")
+        print(f"❌ Error extracting from {file_path}: {e}")
         return None
 
-# Load labels
-df = pd.read_excel(EXCEL_PATH)
+# === Step 4: Extract features and labels for all audio files ===
 features = []
 labels = []
 
-print("🔍 Extracting features...")
-for _, row in df.iterrows():
-    path = os.path.join(AUDIO_DIR, row['filename'])
-    feat = extract_features(path)
+print("🔍 Extracting features from all audio files...")
+
+for idx, row in df.iterrows():
+    file_path = os.path.join(AUDIO_DIR, row['filename'])
+    feat = extract_features(file_path)
     if feat is not None:
         features.append(feat)
         labels.append(row['intent'])
 
-print(f"✅ Extracted {len(features)} samples.")
+print(f"✅ Features extracted for {len(features)} files.")
 
-# Train
-X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2, random_state=42)
+# === Step 5: Split into train/test sets ===
+X_train, X_test, y_train, y_test = train_test_split(
+    features, labels, test_size=0.2, random_state=42
+)
+
+# === Step 6: Train a Random Forest classifier ===
+print("🧠 Training the Random Forest model...")
 clf = RandomForestClassifier(n_estimators=100, random_state=42)
 clf.fit(X_train, y_train)
 
-# Evaluate
+# === Step 7: Evaluate the model ===
 print("\n📊 Classification Report:")
 y_pred = clf.predict(X_test)
 print(classification_report(y_test, y_pred))
-print(f"✅ Accuracy: {accuracy_score(y_test, y_pred)*100:.2f}%")
 
-# Save
-joblib.dump(clf, 'horn_intent_model_with_angle.pkl')
-print("💾 Model saved: horn_intent_model_with_angle.pkl")
+# Print overall accuracy
+accuracy = accuracy_score(y_test, y_pred)
+print(f"✅ Accuracy: {accuracy * 100:.2f}%")
+
+# === Step 8: Save the trained model ===
+joblib.dump(clf, 'horn_intent_model.pkl')
+print("💾 Model saved as horn_intent_model.pkl")
