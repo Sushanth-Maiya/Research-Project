@@ -1,118 +1,165 @@
 # ===== Import necessary libraries =====
-import os                # For file system operations like checking if files exist
-import glob              # For finding file paths using wildcard patterns
-import joblib            # For loading saved machine learning models and scalers
-import librosa           # For audio processing and feature extraction
-import numpy as np       # For numerical computations and handling arrays
-import matplotlib.pyplot as plt  # For plotting the angle in a polar chart
+import os                       # Used to interact with the operating system, like file management
+import glob                     # Used to search for files matching a specified pattern
+import joblib                   # Used to load the trained machine learning model and scaler
+import librosa                  # Library used for audio processing
+import numpy as np              # Library for numerical operations like arrays and mathematical functions
+import matplotlib.pyplot as plt  # Used for plotting the direction on a polar chart
 
-# ===== Define paths for the trained model, scaler, and input audio =====
-MODEL_PATH = 'horn_intent_model.pkl'         # File path to the trained Random Forest model
-SCALER_PATH = 'scaler.pkl'                   # File path to the trained feature scaler (StandardScaler)
-LEFT_AUDIO = glob.glob('input/left/*.wav')   # Finds all .wav files in the 'input/left/' folder (left mic audio)
-RIGHT_AUDIO = glob.glob('input/right/*.wav') # Finds all .wav files in the 'input/right/' folder (right mic audio)
+# ===== Load model and scaler =====
+print("🔍 Loading model and scaler...")                            # Inform that model and scaler are being loaded
+model = joblib.load('horn_intent_model.pkl')                    # Load the pre-trained horn intent classification model
+scaler = joblib.load('scaler.pkl')                              # Load the scaler used for feature normalization
 
-# ===== Load the trained model and scaler from disk =====
-print("🔍 Loading model and scaler...")
-model = joblib.load(MODEL_PATH)   # Loads the saved trained ML model from disk
-scaler = joblib.load(SCALER_PATH) # Loads the saved StandardScaler used during model training
+# ===== Function: GCC-PHAT for Time Delay Estimation =====
+# Function Name: gcc_phat
+# Purpose: Calculates the time delay between two signals using the GCC-PHAT method
+# Inputs:
+#   - sig: First audio signal (numpy array)
+#   - refsig: Second audio signal (numpy array)
+#   - fs: Sampling rate (default is 1)
+#   - max_tau: Optional maximum time delay limit
+#   - interp: Interpolation factor (default is 16)
+# Output:
+#   - Estimated time delay (tau) between the two signals
+
+def gcc_phat(sig, refsig, fs=1, max_tau=None, interp=16):
+    n = sig.shape[0] + refsig.shape[0]                           # Total length for FFT calculation
+    SIG = np.fft.rfft(sig, n=n)                                  # FFT of the first signal
+    REFSIG = np.fft.rfft(refsig, n=n)                            # FFT of the reference signal
+    R = SIG * np.conj(REFSIG)                                    # Cross-power spectrum
+    cc = np.fft.irfft(R / (np.abs(R) + np.finfo(float).eps), n=(interp * n))  # Cross-correlation
+
+    max_shift = int(interp * n / 2)                              # Maximum shift for interpolation
+    if max_tau:                                                  # Limit maximum shift if max_tau is provided
+        max_shift = np.minimum(int(interp * fs * max_tau), max_shift)
+
+    cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))     # Keep only the valid shifts
+    shift = np.argmax(np.abs(cc)) - max_shift                    # Find the shift corresponding to max correlation
+
+    tau = shift / float(interp * fs)                             # Calculate time delay in seconds
+    return tau
 
 # ===== Function: estimate_direction =====
-# This function estimates the direction of the horn sound using the time delay between left and right microphones
+# Function Name: estimate_direction
+# Purpose: Estimates the direction angle based on the time delay between two microphones
 # Inputs:
-#   - left: numpy array of audio samples from the left microphone
-#   - right: numpy array of audio samples from the right microphone
-#   - sr: sampling rate of the audio (samples per second)
-#   - mic_distance: distance between the two microphones (default is 0.2 meters)
+#   - left: Audio signal from the left microphone (numpy array)
+#   - right: Audio signal from the right microphone (numpy array)
+#   - sr: Sampling rate of the audio
+#   - mic_distance: Distance between microphones (default is 0.2 meters)
 # Output:
-#   - Estimated angle of the sound source in degrees
-def estimate_direction(left, right, sr, mic_distance=0.2):
-    corr = np.correlate(left, right, 'full')  # Cross-correlate left and right channels to find similarity at various delays
-    delay = np.argmax(corr) - (len(right) - 1)  # Delay is index of peak correlation minus center point
-    time_diff = delay / sr  # Converts delay in samples to time in seconds
+#   - Estimated direction angle in degrees
 
+def estimate_direction(left, right, sr, mic_distance=0.2):
+    tau = gcc_phat(left, right, fs=sr)                           # Calculate time delay using GCC-PHAT
     try:
-        angle_rad = np.arcsin(np.clip(time_diff * 343 / mic_distance, -1, 1))  # Uses the time difference and speed of sound to estimate angle in radians
-        return np.degrees(angle_rad)  # Converts radians to degrees
+        angle_rad = np.arcsin(np.clip(tau * 343 / mic_distance, -1, 1))  # Calculate angle in radians using speed of sound (343 m/s)
+        return np.degrees(angle_rad)                             # Convert radians to degrees and return
     except:
-        return 0.0  # Returns 0.0 if arcsin fails due to invalid input (e.g., out of domain)
+        return 0.0                                               # Return 0 if calculation fails
 
 # ===== Function: extract_features =====
-# This function extracts audio features from a pair of left and right audio files, and also estimates the direction
+# Function Name: extract_features
+# Purpose: Extracts audio features from both left and right mic input files and estimates the direction angle
 # Inputs:
-#   - left_path: file path to left mic audio (.wav)
-#   - right_path: file path to right mic audio (.wav)
-# Outputs:
-#   - features: combined array of features from left + right + angle
-#   - angle: estimated angle of sound source
+#   - left_path: File path for the left microphone audio (.wav)
+#   - right_path: File path for the right microphone audio (.wav)
+# Output:
+#   - Tuple containing the combined feature vector and the estimated angle
+
+
 def extract_features(left_path, right_path):
     try:
-        y_left, sr_left = librosa.load(left_path, sr=None, mono=False)   # Load left audio file in stereo if available
-        y_right, sr_right = librosa.load(right_path, sr=None, mono=False) # Load right audio file in stereo if available
+        # Load stereo audio files from both microphones
+        y_left, sr_left = librosa.load(left_path, sr=None, mono=False)   # Load left audio file as stereo
+        y_right, sr_right = librosa.load(right_path, sr=None, mono=False) # Load right audio file as stereo
 
-        # If stereo, use only first channel. If mono, use as-is.
+        # Extract first channel from stereo files (mono signal from each mic)
         if y_left.ndim == 2:
-            left = y_left[0]  # Select left channel
+            left = y_left[0]   # Select first channel if stereo
         else:
-            left = y_left     # Use mono channel directly
+            left = y_left      # Use directly if mono
 
         if y_right.ndim == 2:
-            right = y_right[0]  # Select left channel (right mic file)
+            right = y_right[0] # Select first channel if stereo
         else:
-            right = y_right     # Use mono channel directly
+            right = y_right    # Use directly if mono
 
-        sr = sr_left  # Assume both audio files have the same sampling rate
+        sr = sr_left   # Use sampling rate from the left mic (both are same)
 
-        # === Inner function: get_audio_features ===
-        # Extracts various audio features from a given signal (MFCCs, ZCR, Centroid, etc.)
+        # === Internal function to extract features from audio signal ===
+        # Function Name: get_audio_features
+        # Purpose: Extracts various audio features from the given audio signal
+        # Input:
+        #   - signal: Audio signal array
+        # Output:
+        #   - Combined feature vector containing MFCCs, spectral features, and tonal features
+
         def get_audio_features(signal):
-            mfcc = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=13)                 # Extract 13 MFCCs
-            mfcc_mean = np.mean(mfcc.T, axis=0)                                     # Compute mean of MFCCs over time
-            centroid = np.mean(librosa.feature.spectral_centroid(y=signal, sr=sr)) # Measure center of mass of frequency spectrum
-            rolloff = np.mean(librosa.feature.spectral_rolloff(y=signal, sr=sr))   # Frequency where roll-off occurs
-            zcr = np.mean(librosa.feature.zero_crossing_rate(y=signal))            # Rate of zero crossings (frequency estimate)
-            rms = np.mean(librosa.feature.rms(y=signal))                           # Energy of the signal
-            bandwidth = np.mean(librosa.feature.spectral_bandwidth(y=signal, sr=sr)) # Width of the frequency spectrum
-            chroma = np.mean(librosa.feature.chroma_stft(y=signal, sr=sr))         # Chroma: pitch content
-            tonnetz = np.mean(librosa.feature.tonnetz(y=librosa.effects.harmonic(signal), sr=sr)) # Tonal centroid features
-            return np.hstack([mfcc_mean, centroid, rolloff, zcr, rms, bandwidth, chroma, tonnetz]) # Combine all features
+            mfcc = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=13)            # Extract 13 MFCC coefficients
+            mfcc_mean = np.mean(mfcc.T, axis=0)                                # Mean of MFCCs over time
+            centroid = np.mean(librosa.feature.spectral_centroid(y=signal, sr=sr))  # Mean spectral centroid
+            rolloff = np.mean(librosa.feature.spectral_rolloff(y=signal, sr=sr))    # Mean spectral rolloff
+            zcr = np.mean(librosa.feature.zero_crossing_rate(y=signal))            # Mean zero-crossing rate
+            rms = np.mean(librosa.feature.rms(y=signal))                           # Mean RMS energy
+            bandwidth = np.mean(librosa.feature.spectral_bandwidth(y=signal, sr=sr))# Mean spectral bandwidth
+            chroma = np.mean(librosa.feature.chroma_stft(y=signal, sr=sr))          # Mean chroma feature
+            tonnetz = np.mean(librosa.feature.tonnetz(y=librosa.effects.harmonic(signal), sr=sr))  # Mean tonnetz feature
+            return np.hstack([mfcc_mean, centroid, rolloff, zcr, rms, bandwidth, chroma, tonnetz])  # Combine all features
 
-        # Get feature vectors for both channels
-        left_feat = get_audio_features(left)   # Extract features from left mic
-        right_feat = get_audio_features(right) # Extract features from right mic
+        left_feat = get_audio_features(left)     # Extract features from left mic signal
+        right_feat = get_audio_features(right)   # Extract features from right mic signal
 
-        angle = estimate_direction(left, right, sr)  # Estimate direction using time difference
+        angle = estimate_direction(left, right, sr)  # Estimate direction of the horn sound
 
-        features = np.hstack([left_feat, right_feat, angle])  # Combine all features and direction angle into one vector
-        return features, angle  # Return combined feature vector and angle
+        return np.hstack([left_feat, right_feat, angle]), angle  # Combine all features and angle as final feature vector
     except Exception as e:
-        print(f"❌ Feature extraction error: {e}")  # Print any error during extraction
-        return None, None  # Return None if failed
+        print(f"Error extracting features: {e}")  # Print error if extraction fails
+        return None, None
 
-# ===== Prediction block (main script execution) =====
-if not LEFT_AUDIO or not RIGHT_AUDIO:
-    print("❌ No audio files found in input/left/ or input/right/")  # Print error if audio files are missing
+# ===== Prediction Process =====
+LEFT_AUDIO = glob.glob('input/left/*.wav')      # Get all left mic audio files from folder
+RIGHT_AUDIO = glob.glob('input/right/*.wav')    # Get all right mic audio files from folder
+
+if not LEFT_AUDIO or not RIGHT_AUDIO:            # Check if audio files exist in both folders
+    print("❌ No audio files found in input/left/ or input/right/ directory.")
 else:
-    left_file = LEFT_AUDIO[0]   # Select first left mic .wav file
-    right_file = RIGHT_AUDIO[0] # Select first right mic .wav file
-    print(f"🎧 Left: {left_file}")   # Print which left file is used
-    print(f"🎧 Right: {right_file}") # Print which right file is used
+    left_file = LEFT_AUDIO[0]                    # Select the first left mic audio file
+    right_file = RIGHT_AUDIO[0]                  # Select the first right mic audio file
+    print(f"🎧 Left Input File: {left_file}")
+    print(f"🎧 Right Input File: {right_file}")
 
-    features, angle = extract_features(left_file, right_file)  # Extract audio features and direction
+    features, angle = extract_features(left_file, right_file)   # Extract features and direction angle
 
     if features is not None:
-        features_scaled = scaler.transform([features])  # Normalize features using trained scaler
-        prediction = model.predict(features_scaled)[0]  # Predict the horn intent class (returns label)
+        features_scaled = scaler.transform([features])          # Scale the extracted features using the loaded scaler
+        predicted_intent = model.predict(features_scaled)[0]    # Predict the horn intent using the trained model
 
-        print(f"\n🔊 Predicted Intent: **{prediction}**")         # Output predicted class
-        print(f"📐 Estimated Direction: {angle:.2f}°")           # Output estimated direction in degrees
+        print(f"\n🔊 Predicted Horn Intent: {predicted_intent}")
+        print(f"📐 Estimated Direction: {angle:.2f}°")              # Print the estimated angle in degrees
 
-        # ===== Plot the direction on a polar chart (circular direction indicator) =====
-        plt.figure()                                     # Create a new figure
-        ax = plt.subplot(111, polar=True)               # Create a polar subplot
-        ax.plot([0, np.radians(angle)], [0, 1],         # Plot a line from center to angle direction
-                marker='o', color='red', linewidth=2)
-        ax.set_title(f"Direction: {angle:.2f}°", va='bottom')  # Set title showing numeric angle
-        plt.show()                                      # Display the plot
+        # # ===== Plot the direction on a polar chart =====
+        # plt.figure()                                     # Create a new figure
+        # ax = plt.subplot(111, polar=True)               # Create a polar subplot (for circular angle plotting)
+        # ax.plot([0, np.radians(angle)], [0, 1],         # Plot a line from center to angle direction
+        #         marker='o', color='red', linewidth=2)
+        # ax.set_title(f"Direction: {angle:.2f}°", va='bottom')  # Set title showing numeric angle
+        # plt.show()                                      # Display the polar plot
+
+        # Classify direction based on the estimated angle
+        if angle < -30:
+            direction = "Right Back"
+        elif -30 <= angle < -10:
+            direction = "Right"
+        elif -10 <= angle <= 10:
+            direction = "Center Back"
+        elif 10 < angle <= 30:
+            direction = "Left"
+        else:
+            direction = "Left Back"
+
+        print(f"📍 Estimated Horn Direction: {direction} (Angle: {angle:.2f}°)")  # Print final direction label and angle
+
     else:
-        print("⚠️ Could not extract features.")  # Print warning if feature extraction failed
+        print("❗ Feature extraction failed.")

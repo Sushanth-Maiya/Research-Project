@@ -1,138 +1,161 @@
 # ===== Import necessary libraries =====
-import os  # For file and folder path operations
-import pandas as pd  # For reading Excel sheets and working with tabular data
-import librosa  # For audio loading and feature extraction
-import numpy as np  # For handling numerical data and operations
-from sklearn.model_selection import train_test_split, GridSearchCV  # For data splitting and hyperparameter tuning
-from sklearn.ensemble import RandomForestClassifier  # The chosen ML model for horn intent recognition
-from sklearn.preprocessing import StandardScaler  # For feature normalization
-from sklearn.metrics import classification_report, accuracy_score  # For evaluating model performance
-import joblib  # For saving and loading the trained model and scaler
+import os
+import pandas as pd
+import librosa
+import numpy as np
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, accuracy_score
+import joblib
 
 # ===== Define paths =====
-AUDIO_DIR = 'audio'  # Directory containing .wav audio files
-EXCEL_PATH = 'horn_intents.xlsx'  # Path to Excel file containing labels and filenames
+AUDIO_DIR = 'audio'
+EXCEL_PATH = 'horn_intents.xlsx'
+
+# ===== Function: GCC-PHAT for Time Delay Estimation =====
+# Function Name: gcc_phat
+# Purpose: Calculates the time delay between two signals using the GCC-PHAT method
+# Inputs:
+#   - sig: First audio signal (numpy array)
+#   - refsig: Second audio signal (numpy array)
+#   - fs: Sampling rate (default is 1)
+#   - max_tau: Optional maximum time delay limit
+#   - interp: Interpolation factor (default is 16)
+# Output:
+#   - Estimated time delay (tau) between the two signals
+
+def gcc_phat(sig, refsig, fs=1, max_tau=None, interp=16):
+    n = sig.shape[0] + refsig.shape[0]
+    SIG = np.fft.rfft(sig, n=n)
+    REFSIG = np.fft.rfft(refsig, n=n)
+    R = SIG * np.conj(REFSIG)
+    cc = np.fft.irfft(R / (np.abs(R) + np.finfo(float).eps), n=(interp * n))
+
+    max_shift = int(interp * n / 2)
+    if max_tau:
+        max_shift = np.minimum(int(interp * fs * max_tau), max_shift)
+
+    cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))
+    shift = np.argmax(np.abs(cc)) - max_shift
+
+    tau = shift / float(interp * fs)
+    return tau
 
 # ===== Function: estimate_direction =====
-# Calculates the angle from which the horn sound is coming based on time delay between two microphones
+# Function Name: estimate_direction
+# Purpose: Estimates the direction angle based on the time delay between two microphones
 # Inputs:
-#   - left: numpy array of samples from left channel
-#   - right: numpy array of samples from right channel
-#   - sr: sampling rate
-#   - mic_distance: distance between the two microphones (default 0.2 meters)
+#   - left: Audio signal from the left microphone (numpy array)
+#   - right: Audio signal from the right microphone (numpy array)
+#   - sr: Sampling rate of the audio
+#   - mic_distance: Distance between microphones (default is 0.2 meters)
 # Output:
-#   - angle in degrees (float)
-def estimate_direction(left, right, sr, mic_distance=0.2):
-    corr = np.correlate(left, right, 'full')  # Cross-correlation between left and right signals
-    delay = np.argmax(corr) - (len(right) - 1)  # Delay in samples
-    time_diff = delay / sr  # Time delay in seconds
+#   - Estimated direction angle in degrees
 
+def estimate_direction(left, right, sr, mic_distance=0.2):
+    tau = gcc_phat(left, right, fs=sr)
     try:
-        angle_rad = np.arcsin(np.clip(time_diff * 343 / mic_distance, -1, 1))  # Calculate angle in radians
-        return np.degrees(angle_rad)  # Convert to degrees
+        angle_rad = np.arcsin(np.clip(tau * 343 / mic_distance, -1, 1))
+        return np.degrees(angle_rad)
     except:
-        return 0.0  # Return 0 if angle can't be computed
+        return 0.0
 
 # ===== Function: extract_features =====
-# Extracts features from stereo audio file and appends estimated direction
+# Function Name: extract_features
+# Purpose: Extracts audio features from a stereo audio file and estimates the direction angle
 # Inputs:
-#   - file_path: string path to a stereo .wav file
+#   - file_path: Path to the stereo audio file
 # Output:
-#   - A numpy array of combined left + right features + direction, or None on error
+#   - Combined feature vector with left and right channel features and estimated angle
+
 def extract_features(file_path):
     try:
-        y, sr = librosa.load(file_path, sr=None, mono=False)  # Load stereo audio file
+        y, sr = librosa.load(file_path, sr=None, mono=False)
 
-        if y.ndim < 2:  # Ensure the file is stereo
+        if y.ndim < 2:
             print(f"❗ File not stereo: {file_path}")
             return None
 
-        left, right = y[0], y[1]  # Separate left and right channels
+        left, right = y[0], y[1]
 
-        # === Inner Function: get_audio_features ===
-        # Extracts a series of features from a single channel
+        # ===== Internal Function: get_audio_features =====
+        # Function Name: get_audio_features
+        # Purpose: Extracts MFCCs, spectral, and tonal features from an audio signal
+        # Input:
+        #   - signal: Audio signal array
+        # Output:
+        #   - Combined feature vector
+
         def get_audio_features(signal):
-            mfcc = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=13)  # Extract MFCCs
-            mfcc_mean = np.mean(mfcc.T, axis=0)  # Average over time
-            centroid = np.mean(librosa.feature.spectral_centroid(y=signal, sr=sr))  # Centroid
-            rolloff = np.mean(librosa.feature.spectral_rolloff(y=signal, sr=sr))  # Spectral roll-off
-            zcr = np.mean(librosa.feature.zero_crossing_rate(y=signal))  # Zero crossing rate
-            rms = np.mean(librosa.feature.rms(y=signal))  # Root Mean Square energy
-            bandwidth = np.mean(librosa.feature.spectral_bandwidth(y=signal, sr=sr))  # Bandwidth
-            chroma = np.mean(librosa.feature.chroma_stft(y=signal, sr=sr))  # Chroma vector
-            tonnetz = np.mean(librosa.feature.tonnetz(y=librosa.effects.harmonic(signal), sr=sr))  # Tonnetz
-            return np.hstack([mfcc_mean, centroid, rolloff, zcr, rms, bandwidth, chroma, tonnetz])  # Combine all
+            mfcc = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=13)
+            mfcc_mean = np.mean(mfcc.T, axis=0)
+            centroid = np.mean(librosa.feature.spectral_centroid(y=signal, sr=sr))
+            rolloff = np.mean(librosa.feature.spectral_rolloff(y=signal, sr=sr))
+            zcr = np.mean(librosa.feature.zero_crossing_rate(y=signal))
+            rms = np.mean(librosa.feature.rms(y=signal))
+            bandwidth = np.mean(librosa.feature.spectral_bandwidth(y=signal, sr=sr))
+            chroma = np.mean(librosa.feature.chroma_stft(y=signal, sr=sr))
+            tonnetz = np.mean(librosa.feature.tonnetz(y=librosa.effects.harmonic(signal), sr=sr))
+            return np.hstack([mfcc_mean, centroid, rolloff, zcr, rms, bandwidth, chroma, tonnetz])
 
-        left_feat = get_audio_features(left)   # Features from left mic
-        right_feat = get_audio_features(right) # Features from right mic
+        left_feat = get_audio_features(left)
+        right_feat = get_audio_features(right)
 
-        angle = estimate_direction(left, right, sr)  # Estimate direction of horn
+        angle = estimate_direction(left, right, sr)
 
-        return np.hstack([left_feat, right_feat, angle])  # Combine all into one feature vector
+        return np.hstack([left_feat, right_feat, angle])
     except Exception as e:
-        print(f"Error: {file_path} -> {e}")  # Print error if extraction fails
+        print(f"Error: {file_path} -> {e}")
         return None
 
 # ===== Read the Excel file containing filenames and labels =====
-df = pd.read_excel(EXCEL_PATH)  # Load Excel file into a DataFrame
+df = pd.read_excel(EXCEL_PATH)
 
-# ===== Lists to store features and their corresponding labels =====
-features = []  # List to hold feature arrays
-labels = []    # List to hold intent labels
+features = []
+labels = []
 
 print("🔍 Extracting features...")
-# ===== Loop over all rows in the Excel file =====
 for _, row in df.iterrows():
-    path = os.path.join(AUDIO_DIR, row['filename'])  # Construct full path to audio file
-    feat = extract_features(path)  # Extract features
+    path = os.path.join(AUDIO_DIR, row['filename'])
+    feat = extract_features(path)
     if feat is not None:
-        features.append(feat)         # Append valid features
-        labels.append(row['intent'])  # Append label (intent type)
+        features.append(feat)
+        labels.append(row['intent'])
 
-print(f"✅ Extracted {len(features)} samples.")  # Display number of successful extractions
+print(f"✅ Extracted {len(features)} samples.")
 
-# ===== Convert feature and label lists to NumPy arrays =====
-X = np.array(features)  # Feature matrix
-y = np.array(labels)    # Label vector
+# ===== Prepare the dataset =====
+X = np.array(features)
+y = np.array(labels)
 
-# ===== Normalize the features (zero mean, unit variance) =====
-scaler = StandardScaler()        # Create a scaler instance
-X_scaled = scaler.fit_transform(X)  # Fit and transform the feature matrix
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
 
-# ===== Split the data into training and test sets (80/20) =====
-X_train, X_test, y_train, y_test = train_test_split(
-    X_scaled, y, test_size=0.2, random_state=42
-)
+X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
 
-# ===== Define parameter grid for hyperparameter tuning =====
+# ===== Train the model using GridSearch =====
 print("🔧 Training model with GridSearch...")
 param_grid = {
-    'n_estimators': [100, 200],         # Number of trees in the forest
-    'max_depth': [None, 20, 40],        # Max depth of the trees
-    'min_samples_split': [2, 5],        # Min samples required to split an internal node
-    'min_samples_leaf': [1, 2],         # Min samples required to be at a leaf node
-    'class_weight': [None, 'balanced']  # Deal with class imbalance
+    'n_estimators': [100, 200],
+    'max_depth': [None, 20, 40],
+    'min_samples_split': [2, 5],
+    'min_samples_leaf': [1, 2],
+    'class_weight': [None, 'balanced']
 }
 
-# ===== Create and train the model using GridSearchCV =====
-grid = GridSearchCV(
-    RandomForestClassifier(random_state=42),  # Use Random Forest
-    param_grid,  # Pass the hyperparameter grid
-    cv=3,        # 3-fold cross-validation
-    n_jobs=-1    # Use all processors available
-)
-grid.fit(X_train, y_train)  # Train model using training set
+grid = GridSearchCV(RandomForestClassifier(random_state=42), param_grid, cv=3, n_jobs=-1)
+grid.fit(X_train, y_train)
 
-# ===== Use the best estimator from the Grid Search =====
-best_model = grid.best_estimator_  # Best model configuration
+best_model = grid.best_estimator_
 
-# ===== Evaluate performance on test data =====
+# ===== Evaluate the model =====
 print("\n📊 Classification Report:")
-y_pred = best_model.predict(X_test)  # Predict on test set
-print(classification_report(y_test, y_pred))  # Print classification metrics
-print(f"✅ Accuracy: {accuracy_score(y_test, y_pred)*100:.2f}%")  # Print accuracy percentage
+y_pred = best_model.predict(X_test)
+print(classification_report(y_test, y_pred))
+print(f"✅ Accuracy: {accuracy_score(y_test, y_pred) * 100:.2f}%")
 
-# ===== Save the trained model and scaler to disk =====
-joblib.dump(best_model, 'horn_intent_model.pkl')  # Save model to file
-joblib.dump(scaler, 'scaler.pkl')                 # Save scaler for future use
-print("💾 Model saved: horn_intent_model.pkl")  # Notify user
+# ===== Save the model and scaler =====
+joblib.dump(best_model, 'horn_intent_model.pkl')
+joblib.dump(scaler, 'scaler.pkl')
+print("💾 Model saved: horn_intent_model.pkl")
