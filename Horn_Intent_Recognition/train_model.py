@@ -8,6 +8,17 @@ from sklearn.ensemble import RandomForestClassifier  # For the classification mo
 from sklearn.preprocessing import StandardScaler  # For normalizing the feature vectors
 from sklearn.metrics import classification_report, accuracy_score  # For evaluating model performance
 import joblib  # For saving and loading trained models
+from scipy.signal import butter, filtfilt
+
+def bandpass_filter(signal, sr, lowcut=300, highcut=3500, order=4):
+    """Applies a bandpass filter to isolate frequencies between lowcut and highcut Hz.
+    You can change lowcut/highcut values here if needed.
+    """
+    nyq = 0.5 * sr
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return filtfilt(b, a, signal)
 
 # ===== Define paths =====
 AUDIO_DIR = 'audio'  # Folder containing the audio files
@@ -26,22 +37,43 @@ EXCEL_PATH = 'horn_intents.xlsx'  # Excel file containing filenames and labels
 #   - Estimated time delay (tau) between the two signals
 
 def gcc_phat(sig, refsig, fs=1, max_tau=None, interp=16):
-    # Computes the Generalized Cross-Correlation with Phase Transform
-    n = sig.shape[0] + refsig.shape[0]  # Combined length of signals for zero-padding
-    SIG = np.fft.rfft(sig, n=n)  # FFT of first signal
-    REFSIG = np.fft.rfft(refsig, n=n)  # FFT of second signal
-    R = SIG * np.conj(REFSIG)  # Cross-power spectrum
-    cc = np.fft.irfft(R / (np.abs(R) + np.finfo(float).eps), n=(interp * n))  # Cross-correlation via IFFT
+    # """
+    # Computes the time delay between sig and refsig using GCC-PHAT with:
+    # - Sub-sample precision using parabolic interpolation
+    # - Bandpass filter to suppress irrelevant noise
 
-    max_shift = int(interp * n / 2)  # Max shift index
+    # Returns: Estimated delay (tau)
+    # """
+
+    # Bandpass filter both signals
+    sig = bandpass_filter(sig, fs)
+    refsig = bandpass_filter(refsig, fs)
+
+    # Pad signals and compute FFT
+    n = sig.shape[0] + refsig.shape[0]
+    SIG = np.fft.rfft(sig, n=n)
+    REFSIG = np.fft.rfft(refsig, n=n)
+    R = SIG * np.conj(REFSIG)
+    cc = np.fft.irfft(R / (np.abs(R) + np.finfo(float).eps), n=interp * n)
+
+    max_shift = int(interp * n / 2)
     if max_tau:
-        max_shift = np.minimum(int(interp * fs * max_tau), max_shift)  # Limit shift range
+        max_shift = np.minimum(int(interp * fs * max_tau), max_shift)
 
-    cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))  # Center the correlation output
-    shift = np.argmax(np.abs(cc)) - max_shift  # Find the peak correlation shift
+    cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))
+    shift = np.argmax(np.abs(cc)) - max_shift
 
-    tau = shift / float(interp * fs)  # Convert shift to time delay
-    return tau  # Return estimated time delay
+    # --- Sub-sample precision using parabolic interpolation ---
+    if 1 <= shift + max_shift < len(cc) - 1:
+        y1 = cc[shift + max_shift - 1]
+        y2 = cc[shift + max_shift]
+        y3 = cc[shift + max_shift + 1]
+        denom = y1 - 2 * y2 + y3
+        if denom != 0:
+            shift = shift + 0.5 * (y1 - y3) / denom
+
+    tau = shift / float(interp * fs)
+    return tau
 
 # ===== Function: estimate_direction =====
 # Function Name: estimate_direction

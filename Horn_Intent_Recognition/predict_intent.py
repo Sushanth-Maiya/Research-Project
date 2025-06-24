@@ -5,6 +5,17 @@ import joblib                   # Used to load the trained machine learning mode
 import librosa                  # Library used for audio processing
 import numpy as np              # Library for numerical operations like arrays and mathematical functions
 import matplotlib.pyplot as plt  # Used for plotting the direction on a polar chart
+from scipy.signal import butter, filtfilt
+
+def bandpass_filter(signal, sr, lowcut=300, highcut=3500, order=4):
+    """Applies a bandpass filter to isolate frequencies between lowcut and highcut Hz.
+    You can change lowcut/highcut values here if needed.
+    """
+    nyq = 0.5 * sr
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return filtfilt(b, a, signal)
 
 # ===== Load model and scaler =====
 print("🔍 Loading model and scaler...")                            # Inform that model and scaler are being loaded
@@ -24,21 +35,44 @@ scaler = joblib.load('scaler.pkl')                              # Load the scale
 #   - Estimated time delay (tau) between the two signals
 
 def gcc_phat(sig, refsig, fs=1, max_tau=None, interp=16):
-    n = sig.shape[0] + refsig.shape[0]                           # Total length for FFT calculation
-    SIG = np.fft.rfft(sig, n=n)                                  # FFT of the first signal
-    REFSIG = np.fft.rfft(refsig, n=n)                            # FFT of the reference signal
-    R = SIG * np.conj(REFSIG)                                    # Cross-power spectrum
-    cc = np.fft.irfft(R / (np.abs(R) + np.finfo(float).eps), n=(interp * n))  # Cross-correlation
+    # """
+    # Computes the time delay between sig and refsig using GCC-PHAT with:
+    # - Sub-sample precision using parabolic interpolation
+    # - Bandpass filter to suppress irrelevant noise
 
-    max_shift = int(interp * n / 2)                              # Maximum shift for interpolation
-    if max_tau:                                                  # Limit maximum shift if max_tau is provided
+    # Returns: Estimated delay (tau)
+    # """
+
+    # Bandpass filter both signals
+    sig = bandpass_filter(sig, fs)
+    refsig = bandpass_filter(refsig, fs)
+
+    # Pad signals and compute FFT
+    n = sig.shape[0] + refsig.shape[0]
+    SIG = np.fft.rfft(sig, n=n)
+    REFSIG = np.fft.rfft(refsig, n=n)
+    R = SIG * np.conj(REFSIG)
+    cc = np.fft.irfft(R / (np.abs(R) + np.finfo(float).eps), n=interp * n)
+
+    max_shift = int(interp * n / 2)
+    if max_tau:
         max_shift = np.minimum(int(interp * fs * max_tau), max_shift)
 
-    cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))     # Keep only the valid shifts
-    shift = np.argmax(np.abs(cc)) - max_shift                    # Find the shift corresponding to max correlation
+    cc = np.concatenate((cc[-max_shift:], cc[:max_shift+1]))
+    shift = np.argmax(np.abs(cc)) - max_shift
 
-    tau = shift / float(interp * fs)                             # Calculate time delay in seconds
+    # --- Sub-sample precision using parabolic interpolation ---
+    if 1 <= shift + max_shift < len(cc) - 1:
+        y1 = cc[shift + max_shift - 1]
+        y2 = cc[shift + max_shift]
+        y3 = cc[shift + max_shift + 1]
+        denom = y1 - 2 * y2 + y3
+        if denom != 0:
+            shift = shift + 0.5 * (y1 - y3) / denom
+
+    tau = shift / float(interp * fs)
     return tau
+
 
 # ===== Function: estimate_direction =====
 # Function Name: estimate_direction
