@@ -10,79 +10,64 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, accuracy_score
 import lightgbm as lgb
 
-# === CONFIG ===
+# Config
 EXCEL_PATH = 'horn_intents_updated.xlsx'
 AUDIO_DIR = 'audio'
-LABEL_COLUMN = 'horn'  # Column name for horn or not (must exist in Excel)
-LOWCUT = 300           # Bandpass filter low cutoff (Hz)
-HIGHCUT = 3500         # Bandpass filter high cutoff (Hz)
+LABEL_COLUMN = 'horn_presence'
+LOWCUT, HIGHCUT = 300, 3500
 
-# === Preprocessing Functions ===
-def bandpass_filter(signal, sr, lowcut=300, highcut=3500, order=5):
+def bandpass_filter(signal, sr):
     nyq = 0.5 * sr
-    b, a = butter(order, [lowcut/nyq, highcut/nyq], btype='band')
+    b, a = butter(5, [LOWCUT/nyq, HIGHCUT/nyq], btype='band')
     return lfilter(b, a, signal)
 
-def energy_thresholding(signal, frame_size=2048, threshold=0.01):
-    energy = np.array([
-        np.sum(np.abs(signal[i:i+frame_size]**2))
-        for i in range(0, len(signal), frame_size)
-    ])
-    high_energy_frames = energy > threshold
-    if np.any(high_energy_frames):
-        return signal[np.repeat(high_energy_frames, frame_size)[:len(signal)]]
-    return signal
+def energy_thresholding(signal):
+    frame_size, threshold = 2048, 0.01
+    energy = np.array([np.sum(np.abs(signal[i:i+frame_size]**2))
+                       for i in range(0, len(signal), frame_size)])
+    mask = energy > threshold
+    return signal[np.repeat(mask, frame_size)[:len(signal)]] if np.any(mask) else signal
 
-def extract_features(file_path):
+def extract_features(path):
     try:
-        y, sr = librosa.load(file_path, sr=None)
-        y = bandpass_filter(y, sr, LOWCUT, HIGHCUT)
-        noise_clip = y[:int(sr * 0.5)]
-        y = nr.reduce_noise(y=y, sr=sr, y_noise=noise_clip)
+        y, sr = librosa.load(path, sr=None)
+        y = bandpass_filter(y, sr)
+        y = nr.reduce_noise(y=y, sr=sr, y_noise=y[:sr//2])
         y = energy_thresholding(y)
-
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+        if mfcc.shape[1] < 9:
+            mfcc = np.pad(mfcc, ((0,0),(0,9-mfcc.shape[1])), mode='edge')
         delta = librosa.feature.delta(mfcc)
         delta2 = librosa.feature.delta(mfcc, order=2)
-        mfcc_combined = np.vstack([mfcc, delta, delta2])
-        mfcc_mean = np.mean(mfcc_combined.T, axis=0)
-
-        return mfcc_mean
+        combined = np.vstack([mfcc, delta, delta2])
+        return np.mean(combined.T, axis=0)
     except Exception as e:
-        print(f"❌ Error processing {file_path}: {e}")
+        print(f"Error: {path} -> {e}")
         return None
 
-# === Load dataset ===
 df = pd.read_excel(EXCEL_PATH)
-features, labels = [], []
-
-for _, row in df.iterrows():
-    filename = row['filename']
-    label = row[LABEL_COLUMN]
-    path = os.path.join(AUDIO_DIR, filename)
-    feat = extract_features(path)
+X, y = [], []
+for _, r in df.iterrows():
+    feat = extract_features(os.path.join(AUDIO_DIR, r['filename']))
     if feat is not None:
-        features.append(feat)
-        labels.append(label)
+        X.append(feat); y.append(r[LABEL_COLUMN])
 
-X = np.array(features)
-y = np.array(labels)
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+X = np.array(X); y = np.array(y)
+scaler = StandardScaler().fit(X)
+Xs = scaler.transform(X)
+col_names = [f"f{i}" for i in range(Xs.shape[1])]
+Xdf = pd.DataFrame(Xs, columns=col_names)
 
-# === Train LightGBM ===
-print("⚙️ Training LightGBM horn detector...")
-model = lgb.LGBMClassifier()
-model.fit(X_train, y_train)
+Xtr, Xte, ytr, yte = train_test_split(Xdf, y, test_size=0.2, random_state=42)
+model = lgb.LGBMClassifier(n_estimators=200, learning_rate=0.05,
+                           max_depth=7, num_leaves=31,
+                           random_state=42, verbosity=-1)
+model.fit(Xtr, ytr)
 
-# === Evaluate ===
-y_pred = model.predict(X_test)
-print("\n📊 Classification Report:")
-print(classification_report(y_test, y_pred))
-print(f"✅ Accuracy: {accuracy_score(y_test, y_pred)*100:.2f}%")
+yp = model.predict(Xte)
+print(classification_report(yte, yp))
+print("Acc:", accuracy_score(yte, yp))
 
-# === Save model ===
-joblib.dump(model, 'horn_detector_model.pkl')
+joblib.dump(model, 'horn_lgbm.pkl')
 joblib.dump(scaler, 'horn_scaler.pkl')
-print("💾 Model saved as horn_detector_model.pkl")
+print("✔ LightGBM model saved.")
