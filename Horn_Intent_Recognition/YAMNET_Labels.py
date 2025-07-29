@@ -1,8 +1,8 @@
-import yamnet
+import yamnet_model
 import params
 
 # Load class names
-class_names = yamnet.class_names('yamnet_class_map.csv')
+class_names = yamnet_model.class_names('yamnet_class_map.csv')
 
 # List all labels containing 'horn'
 print("Available 'horn' labels:\n")

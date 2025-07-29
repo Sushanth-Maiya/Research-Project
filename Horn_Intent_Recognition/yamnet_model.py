@@ -19,7 +19,8 @@ import csv
 
 import numpy as np
 import tensorflow as tf
-from tf_keras import Model, layers
+import keras
+from keras import Model, layers
 
 import features as features_lib
 

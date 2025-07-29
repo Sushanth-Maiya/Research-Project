@@ -8,15 +8,14 @@ import glob
 import numpy as np
 import librosa
 import tensorflow as tf
-import yamnet
+import yamnet_model
 import params
 
-# Initialize model and load weights
-yamnet_model = yamnet.yamnet_frames_model(params.Params())
-yamnet_model.load_weights('yamnet.h5')
+model = yamnet_model.yamnet_frames_model(params.Params())
+model.load_weights('yamnet.h5')
 
-# Load class names
-class_names = yamnet.class_names('yamnet_class_map.csv')
+class_names = yamnet_model.class_names('yamnet_class_map.csv')
+
 
 # Define all relevant horn indices (including French horn)
 horn_indices = [181, 302, 312, 325, 395]
@@ -38,7 +37,7 @@ for wav_file in wav_files:
     waveform, sr = librosa.load(wav_file, sr=16000)
 
     # Run inference
-    scores, embeddings, spectrogram = yamnet_model(waveform)
+    scores, embeddings, spectrogram = model(waveform)
 
     # Convert to numpy
     scores_np = scores.numpy()
