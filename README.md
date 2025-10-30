@@ -1,9 +1,15 @@
 Horn Intent Recognition & Localization
+
 **Project Name:** Research‑Project
+
 **Author:** Sushanth Ganesh Maiya
+
 **GitHub:** https://github.com/Sushanth‑Maiya/Research‑Project
+
 **Contact:** sushanthmaiya98@gmail.com
+
 ————————————————————
+
 Table of Contents
 - Project Overview
 - Features & Approach
