@@ -14,11 +14,16 @@ from scipy.signal import butter, lfilter
 AUDIO_DIR = 'audio'
 EXCEL_PATH = 'horn_intents.xlsx'
 
-# ===== Bandpass Filter (Adjust dB threshold here) =====
-def bandpass_filter(signal, sr, lowcut=300, highcut=3000, order=6):
+# ===== Bandpass Filter =====
+def bandpass_filter(signal, sr, lowcut=250, highcut=5000, order=6):
     nyquist = 0.5 * sr
     b, a = butter(order, [lowcut / nyquist, highcut / nyquist], btype='band')
     return lfilter(b, a, signal)
+
+# ===== Amplitude in dBFS =====
+def compute_amplitude_db(signal):
+    rms = np.sqrt(np.mean(signal**2))
+    return 20 * np.log10(rms + 1e-6)  # avoid log(0)
 
 # ===== GCC-PHAT with sub-sample precision =====
 def gcc_phat(sig, refsig, fs=1, max_tau=None, interp=16):
@@ -45,13 +50,20 @@ def estimate_direction(left, right, sr, mic_distance=0.2):
     except:
         return 0.0
 
-def extract_features(file_path):
+def extract_features(file_path, amplitude_threshold_db=-45):
     try:
         y, sr = librosa.load(file_path, sr=None, mono=False)
         if y.ndim < 2:
             return None
 
-        left, right = bandpass_filter(y[0], sr), bandpass_filter(y[1], sr)
+        # Amplitude check (reject weak signals)
+        db_left = compute_amplitude_db(y[0])
+        db_right = compute_amplitude_db(y[1])
+        if db_left < amplitude_threshold_db and db_right < amplitude_threshold_db:
+            return None
+
+        left = bandpass_filter(y[0], sr)
+        right = bandpass_filter(y[1], sr)
 
         def get_audio_features(signal):
             mfcc = librosa.feature.mfcc(y=signal, sr=sr, n_mfcc=13)
