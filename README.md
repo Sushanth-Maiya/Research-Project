@@ -4,7 +4,7 @@ Horn Intent Recognition & Localization
 
 **Author:** Sushanth Ganesh Maiya
 
-**GitHub:** https://github.com/Sushanth‑Maiya/Research‑Project
+**GitHub:** [https://github.com/Sushanth‑Maiya/Research‑Project](https://github.com/Sushanth-Maiya/Research-Project)
 
 **Contact:** sushanthmaiya98@gmail.com
 
